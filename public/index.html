@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Warehouse Order Simulator</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Courier New', monospace; background: #0d1117; color: #c9d1d9; padding: 24px; }
+    h1 { color: #58a6ff; font-size: 1.4rem; margin-bottom: 4px; }
+    .subtitle { color: #8b949e; font-size: 0.8rem; margin-bottom: 24px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px; }
+    .card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; }
+    .card .label { font-size: 0.7rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+    .card .value { font-size: 2rem; font-weight: bold; color: #58a6ff; }
+    .card.warn .value { color: #f0883e; }
+    .card.err  .value { color: #f85149; }
+    .card.ok   .value { color: #3fb950; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+    th { text-align: left; padding: 8px 12px; border-bottom: 1px solid #30363d; color: #8b949e; font-weight: normal; text-transform: uppercase; font-size: 0.7rem; }
+    td { padding: 8px 12px; border-bottom: 1px solid #21262d; }
+    tr:hover td { background: #161b22; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 0.7rem; }
+    .badge.received  { background: #1f3a5f; color: #58a6ff; }
+    .badge.picking   { background: #3b2a00; color: #e3b341; }
+    .badge.packing   { background: #2d2a00; color: #f0e68c; }
+    .badge.shipping  { background: #1a3526; color: #3fb950; }
+    .badge.delivered { background: #1a3526; color: #3fb950; }
+    .badge.failed    { background: #3b1a1a; color: #f85149; }
+    .section-title { color: #8b949e; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.1em; margin: 20px 0 10px; }
+    .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #3fb950; margin-right: 6px; }
+    .status-dot.err { background: #f85149; }
+    #health-bar { font-size: 0.75rem; color: #8b949e; margin-bottom: 20px; }
+  </style>
+</head>
+<body>
+  <h1>&#9632; Warehouse Order Simulator</h1>
+  <p class="subtitle">Live order pipeline — refreshes every 2s</p>
+
+  <div id="health-bar">
+    <span class="status-dot" id="dot"></span>
+    <span id="health-text">Connecting…</span>
+  </div>
+
+  <div class="grid" id="metrics-grid">
+    <div class="card"><div class="label">Received</div><div class="value" id="m-received">—</div></div>
+    <div class="card warn"><div class="label">Picking</div><div class="value" id="m-picking">—</div></div>
+    <div class="card warn"><div class="label">Packing</div><div class="value" id="m-packing">—</div></div>
+    <div class="card warn"><div class="label">Shipping</div><div class="value" id="m-shipping">—</div></div>
+    <div class="card ok"><div class="label">Delivered</div><div class="value" id="m-delivered">—</div></div>
+    <div class="card err"><div class="label">Failed</div><div class="value" id="m-failed">—</div></div>
+    <div class="card ok"><div class="label">Delivered / hr</div><div class="value" id="m-throughput">—</div></div>
+    <div class="card"><div class="label">Avg fulfillment</div><div class="value" id="m-avg">—</div></div>
+    <div class="card err"><div class="label">Stuck orders</div><div class="value" id="m-stuck">—</div></div>
+  </div>
+
+  <div class="section-title">Recent orders</div>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Ref</th>
+        <th>State</th>
+        <th>Priority</th>
+        <th>Created</th>
+        <th>Updated</th>
+        <th>Error</th>
+      </tr>
+    </thead>
+    <tbody id="orders-tbody"></tbody>
+  </table>
+
+  <script>
+    const $ = id => document.getElementById(id);
+
+    async function refresh() {
+      try {
+        const [health, metrics, orders] = await Promise.all([
+          fetch('/api/health').then(r => r.json()),
+          fetch('/api/metrics').then(r => r.json()),
+          fetch('/api/orders').then(r => r.json()),
+        ]);
+
+        // health
+        const ok = health.status === 'ok';
+        $('dot').className = 'status-dot' + (ok ? '' : ' err');
+        $('health-text').textContent = ok
+          ? `DB connected — ${new Date().toLocaleTimeString()}`
+          : 'DB unreachable!';
+
+        // metrics
+        const s = metrics.by_state ?? {};
+        $('m-received').textContent  = s.received  ?? 0;
+        $('m-picking').textContent   = s.picking    ?? 0;
+        $('m-packing').textContent   = s.packing    ?? 0;
+        $('m-shipping').textContent  = s.shipping   ?? 0;
+        $('m-delivered').textContent = s.delivered  ?? 0;
+        $('m-failed').textContent    = s.failed     ?? 0;
+        $('m-throughput').textContent = metrics.delivered_last_hour;
+        $('m-avg').textContent = metrics.avg_fulfillment_secs
+          ? metrics.avg_fulfillment_secs + 's' : '—';
+        $('m-stuck').textContent = metrics.stuck_orders;
+
+        // orders table
+        const tbody = $('orders-tbody');
+        tbody.innerHTML = orders.slice(0, 30).map(o => `
+          <tr>
+            <td style="font-size:0.7rem;color:#8b949e">${o.id.slice(0, 8)}…</td>
+            <td>${o.external_ref ?? '—'}</td>
+            <td><span class="badge ${o.state}">${o.state}</span></td>
+            <td>${o.priority}</td>
+            <td>${new Date(o.created_at).toLocaleTimeString()}</td>
+            <td>${new Date(o.updated_at).toLocaleTimeString()}</td>
+            <td style="color:#f85149;font-size:0.7rem">${o.error_msg ?? ''}</td>
+          </tr>
+        `).join('');
+      } catch (e) {
+        $('health-text').textContent = 'Error: ' + e.message;
+        $('dot').className = 'status-dot err';
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>

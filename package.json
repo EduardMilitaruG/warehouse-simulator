@@ -7,11 +7,19 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "nodemon --exec ts-node src/index.ts",
-    "logs": "tail -f logs/warehouse.log | pino-pretty"
+    "logs": "tail -f logs/warehouse.log | pino-pretty",
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "typecheck": "tsc --noEmit"
   },
-  "keywords": ["warehouse", "state-machine", "simulator"],
+  "keywords": [
+    "warehouse",
+    "state-machine",
+    "simulator"
+  ],
   "author": "Eduard Militaru",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
@@ -24,9 +32,13 @@
     "@types/express": "^5.0.6",
     "@types/node": "^25.8.0",
     "@types/pg": "^8.20.0",
+    "@types/supertest": "^7.2.1",
     "@types/uuid": "^10.0.0",
+    "@vitest/coverage-v8": "^3.2.7",
     "nodemon": "^3.1.14",
+    "supertest": "^7.3.1",
     "ts-node": "^10.9.2",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^3.2.7"
   }
 }

@@ -1,5 +1,6 @@
+import { PoolClient } from 'pg';
 import { pool } from './pool';
-import { OrderState } from '../lib/stateMachine';
+import { OrderState, canTransition } from '../lib/stateMachine';
 import { log } from '../lib/logger';
 
 export interface OrderRow {
@@ -96,57 +97,88 @@ export async function getStateHistory(orderId: string) {
   return rows;
 }
 
+/**
+ * Thrown when an order is no longer in the state the caller expected,
+ * e.g. another worker moved it first. Nothing is written in that case.
+ */
+export class StaleTransitionError extends Error {
+  constructor(orderId: string, from: OrderState, to: OrderState) {
+    super(`Order ${orderId} is no longer '${from}', cannot move to '${to}'`);
+    this.name = 'StaleTransitionError';
+  }
+}
+
+/**
+ * Runs fn inside a transaction. If the caller passes its own client it owns
+ * the transaction, so fn runs on that client directly.
+ */
+async function inTransaction<T>(
+  client: PoolClient | undefined,
+  fn: (c: PoolClient) => Promise<T>
+): Promise<T> {
+  if (client) return fn(client);
+  const own = await pool.connect();
+  try {
+    await own.query('BEGIN');
+    const result = await fn(own);
+    await own.query('COMMIT');
+    return result;
+  } catch (err) {
+    await own.query('ROLLBACK');
+    throw err;
+  } finally {
+    own.release();
+  }
+}
+
 export async function transitionOrder(
   orderId: string,
   from: OrderState,
   to: OrderState,
-  note?: string
+  note?: string,
+  client?: PoolClient
 ): Promise<void> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
+  if (to === 'failed') throw new Error('Use failOrder() to fail an order');
+  if (!canTransition(from, to)) throw new Error(`Invalid transition '${from}' -> '${to}'`);
 
-    await client.query(
+  await inTransaction(client, async (c) => {
+    const { rowCount } = await c.query(
       `UPDATE orders SET state = $1 WHERE id = $2 AND state = $3`,
       [to, orderId, from]
     );
-    await client.query(
+    if (rowCount === 0) throw new StaleTransitionError(orderId, from, to);
+
+    await c.query(
       `INSERT INTO state_transitions (order_id, from_state, to_state, note)
        VALUES ($1, $2, $3, $4)`,
       [orderId, from, to, note ?? null]
     );
-
-    await client.query('COMMIT');
-    log.info({ orderId, from, to, note }, 'order.transition');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
+  log.info({ orderId, from, to, note }, 'order.transition');
 }
 
-export async function failOrder(orderId: string, from: OrderState, reason: string): Promise<void> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await client.query(
-      `UPDATE orders SET state = 'failed', error_msg = $1 WHERE id = $2`,
-      [reason, orderId]
+export async function failOrder(
+  orderId: string,
+  from: OrderState,
+  reason: string,
+  client?: PoolClient
+): Promise<void> {
+  if (!canTransition(from, 'failed')) throw new Error(`Invalid transition '${from}' -> 'failed'`);
+
+  await inTransaction(client, async (c) => {
+    const { rowCount } = await c.query(
+      `UPDATE orders SET state = 'failed', error_msg = $1 WHERE id = $2 AND state = $3`,
+      [reason, orderId, from]
     );
-    await client.query(
+    if (rowCount === 0) throw new StaleTransitionError(orderId, from, 'failed');
+
+    await c.query(
       `INSERT INTO state_transitions (order_id, from_state, to_state, note)
        VALUES ($1, $2, 'failed', $3)`,
       [orderId, from, reason]
     );
-    await client.query('COMMIT');
-    log.warn({ orderId, from, reason }, 'order.failed');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
+  log.warn({ orderId, from, reason }, 'order.failed');
 }
 
 export async function getMetrics() {

@@ -9,26 +9,16 @@ import {
 } from '../db/orders';
 import { pool } from '../db/pool';
 import { log } from '../lib/logger';
+import { isUuid, validateCreateOrder } from '../lib/validation';
 
 export const router = Router();
 
 // POST /orders — create a new order
 router.post('/orders', async (req: Request, res: Response) => {
+  const error = validateCreateOrder(req.body);
+  if (error) return res.status(400).json({ error });
+
   const { items, external_ref, priority } = req.body;
-
-  if (!Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ error: 'items must be a non-empty array' });
-  }
-
-  for (const item of items) {
-    if (!item.sku || typeof item.sku !== 'string') {
-      return res.status(400).json({ error: 'each item must have a string sku' });
-    }
-    if (!Number.isInteger(item.quantity) || item.quantity < 1) {
-      return res.status(400).json({ error: 'each item must have quantity >= 1' });
-    }
-  }
-
   try {
     const order = await createOrder(items, external_ref, priority);
     return res.status(201).json(order);
@@ -55,6 +45,7 @@ router.get('/orders', async (_req: Request, res: Response) => {
 // GET /orders/:id — single order with items + history
 router.get('/orders/:id', async (req: Request, res: Response) => {
   const id = String(req.params['id']);
+  if (!isUuid(id)) return res.status(400).json({ error: 'Order id must be a UUID' });
   try {
     const [order, items, history] = await Promise.all([
       getOrderById(id),
@@ -71,8 +62,13 @@ router.get('/orders/:id', async (req: Request, res: Response) => {
 
 // GET /inventory — see stock levels
 router.get('/inventory', async (_req: Request, res: Response) => {
-  const { rows } = await pool.query(`SELECT * FROM inventory ORDER BY sku`);
-  return res.json(rows);
+  try {
+    const { rows } = await pool.query(`SELECT * FROM inventory ORDER BY sku`);
+    return res.json(rows);
+  } catch (err) {
+    log.error({ err }, 'api.inventory.error');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // GET /metrics — operator dashboard data

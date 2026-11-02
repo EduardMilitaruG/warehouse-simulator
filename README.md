@@ -1,5 +1,7 @@
 # Warehouse Order Simulator
 
+[![CI](https://github.com/EduardMilitaruG/warehouse-simulator/actions/workflows/ci.yml/badge.svg)](https://github.com/EduardMilitaruG/warehouse-simulator/actions/workflows/ci.yml)
+
 A learning project simulating a simplified warehouse order fulfilment pipeline.
 Built to practise the system-thinking, observability, and diagnostic patterns
 relevant to warehouse automation software — state machines, structured logging,
@@ -143,6 +145,48 @@ make reset         Drop and recreate schema (local only)
 | `PGPASSWORD`         | warehouse| DB password                                    |
 | `FAILURE_RATE`       | `0.15`   | Fault injection probability per worker tick (0–1) |
 | `WORKER_INTERVAL_MS` | `2000`   | Worker poll interval in milliseconds           |
+
+---
+
+## Testing
+
+97 tests run with [Vitest](https://vitest.dev) on every push and pull request
+([CI workflow](.github/workflows/ci.yml)). Integration tests use a real
+PostgreSQL 16 database, not mocks, because most of the interesting behaviour
+lives in SQL: transactions, row locks and CHECK constraints.
+
+| Suite | Tests | What it covers |
+|---|---:|---|
+| `tests/unit/stateMachine.test.ts` | 46 | Every pair in the 6×6 transition matrix, the happy path, terminal states |
+| `tests/unit/validation.test.ts` | 27 | Boundary values for priority, quantity and `external_ref`; UUID format |
+| `tests/integration/orders.api.test.ts` | 16 | HTTP contract via Supertest: status codes, rollback on bad SKU, ordering, metrics |
+| `tests/integration/worker.test.ts` | 8 | Worker ticks, fault injection, priority order, concurrent workers, audit log integrity |
+
+```bash
+docker compose up -d db      # Postgres on :5432
+npm test                     # unit + integration
+npm run test:unit            # no database needed
+npm run test:integration -- --coverage
+```
+
+The worker takes `failureRate` and `rng` as options, so fault injection is
+deterministic in tests instead of depending on `Math.random()`.
+
+### Bugs the tests found
+
+Each of these has a test that fails on the code before the fix.
+
+| # | Input / situation | Before | After |
+|---|---|---|---|
+| 1 | `POST /api/orders` with `priority: 9` or a 65-char `external_ref` | 500, Postgres CHECK / length violation | 400 with a message |
+| 2 | `GET /api/orders/abc` | 500, invalid cast to `uuid` | 400 `Order id must be a UUID` |
+| 3 | `transitionOrder()` on an order another worker already moved | `UPDATE` matched 0 rows but the audit row was still inserted, so `state_transitions` recorded a move that never happened | Throws `StaleTransitionError`, writes nothing |
+| 4 | `failOrder()` on a delivered order | Order flipped from `delivered` to `failed` | Rejected by the state machine |
+| 5 | `transitionOrder(id, 'received', 'shipping')` | Accepted, skipping two stages | Rejected as an invalid transition |
+
+The worker's `SELECT ... FOR UPDATE SKIP LOCKED` also ran outside a
+transaction, so its row locks were released as soon as the query returned.
+The whole batch now runs in one transaction.
 
 ---
 
@@ -314,4 +358,5 @@ Knowing where your model ends is as important as knowing what it covers.
 - **Framework:** Express 5
 - **Database:** PostgreSQL 16
 - **Logging:** Pino (structured JSON → stdout + file)
+- **Testing:** Vitest, Supertest, real PostgreSQL in GitHub Actions
 - **Deployment:** Docker Compose (single command, Linux-compatible)

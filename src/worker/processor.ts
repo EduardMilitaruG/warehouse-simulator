@@ -22,42 +22,64 @@ const FAULT_REASONS: Record<OrderState, string[]> = {
   failed:    [],
 };
 
-function shouldFail(): boolean {
-  return Math.random() < FAILURE_RATE;
-}
-
-function pickReason(state: OrderState): string {
+function pickReason(state: OrderState, rng: () => number): string {
   const reasons = FAULT_REASONS[state];
-  return reasons[Math.floor(Math.random() * reasons.length)] ?? 'Unknown error';
+  return reasons[Math.floor(rng() * reasons.length)] ?? 'Unknown error';
 }
 
-export async function processBatch(): Promise<void> {
-  const { rows } = await pool.query<{ id: string; state: OrderState }>(
-    `SELECT id, state FROM orders
-     WHERE state NOT IN ('delivered', 'failed')
-     ORDER BY priority DESC, created_at ASC
-     LIMIT $1
-     FOR UPDATE SKIP LOCKED`,
-    [BATCH_SIZE]
-  );
+export interface BatchOptions {
+  failureRate?: number;
+  rng?: () => number;
+}
 
-  for (const order of rows) {
-    const current = order.state as OrderState;
-    if (isTerminal(current)) continue;
+/**
+ * Advances one batch of orders and returns how many it touched. The batch
+ * runs in one transaction so the FOR UPDATE SKIP LOCKED row locks are held
+ * until every order in it has moved; a second worker skips those rows.
+ */
+export async function processBatch({
+  failureRate = FAILURE_RATE,
+  rng = Math.random,
+}: BatchOptions = {}): Promise<number> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{ id: string; state: OrderState }>(
+      `SELECT id, state FROM orders
+       WHERE state NOT IN ('delivered', 'failed')
+       ORDER BY priority DESC, created_at ASC
+       LIMIT $1
+       FOR UPDATE SKIP LOCKED`,
+      [BATCH_SIZE]
+    );
 
-    if (shouldFail()) {
-      const reason = pickReason(current);
-      await failOrder(order.id, current, reason);
-      log.warn({ orderId: order.id, state: current, reason }, 'fault.injected');
-    } else {
-      const next = nextState(current);
-      await transitionOrder(
-        order.id,
-        current,
-        next,
-        `Auto-advanced by worker: ${STATE_LABELS[next]}`
-      );
+    for (const order of rows) {
+      const current = order.state as OrderState;
+      if (isTerminal(current)) continue;
+
+      if (rng() < failureRate) {
+        const reason = pickReason(current, rng);
+        await failOrder(order.id, current, reason, client);
+        log.warn({ orderId: order.id, state: current, reason }, 'fault.injected');
+      } else {
+        const next = nextState(current);
+        await transitionOrder(
+          order.id,
+          current,
+          next,
+          `Auto-advanced by worker: ${STATE_LABELS[next]}`,
+          client
+        );
+      }
     }
+
+    await client.query('COMMIT');
+    return rows.length;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
 }
 
